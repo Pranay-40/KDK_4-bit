@@ -16,21 +16,31 @@ export async function updateUser(data) {
   if (!user) throw new Error("User not found");
 
   try {
-    // Start a transaction to handle both operations
+    // Check if industry exists outside of transaction
+    let industryInsight = await db.industryInsight.findUnique({
+      where: {
+        industry: data.industry,
+      },
+    });
+
+    let insights = null;
+    if (!industryInsight) {
+      // Call Gemini API outside the transaction
+      insights = await generateAIInsights(data.industry);
+    }
+
     const result = await db.$transaction(
       async (tx) => {
-        // First check if industry exists
-        let industryInsight = await tx.industryInsight.findUnique({
+        // Double check in case it was created concurrently
+        let txIndustryInsight = await tx.industryInsight.findUnique({
           where: {
             industry: data.industry,
           },
         });
 
-        // If industry doesn't exist, create it with default values
-        if (!industryInsight) {
-          const insights = await generateAIInsights(data.industry);
-
-          industryInsight = await db.industryInsight.create({
+        // If industry still doesn't exist and we have the insights, create it
+        if (!txIndustryInsight && insights) {
+          txIndustryInsight = await tx.industryInsight.create({
             data: {
               industry: data.industry,
               ...insights,
@@ -52,15 +62,15 @@ export async function updateUser(data) {
           },
         });
 
-        return { updatedUser, industryInsight };
+        return { updatedUser, txIndustryInsight };
       },
       {
-        timeout: 10000, // default: 5000
+        timeout: 10000,
       }
     );
 
     revalidatePath("/");
-    return result.user;
+    return result.updatedUser;
   } catch (error) {
     console.error("Error updating user and industry:", error.message);
     throw new Error("Failed to update profile");
